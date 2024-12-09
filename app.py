@@ -19,7 +19,7 @@ import requests
 from asgiref.wsgi import WsgiToAsgi
 from scanner import SecurityScanner, ScanConfig, scan_repository_handler
 from api import api, analysis_bp
-from api_gitlab import gitlab_api 
+from gitlab_api import gitlab_api
 
 # Load environment variables in development
 if os.getenv('FLASK_ENV') != 'production':
