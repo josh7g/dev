@@ -10,7 +10,7 @@ import logging
 from pathlib import Path
 import asyncio
 import logging
-from scanner_gitlab import scan_gitlab_repository_handler, deduplicate_findings
+from gitlab_scanner import scan_gitlab_repository_handler, deduplicate_findings
 from typing import Dict, Any, List
 from datetime import datetime
 import json
