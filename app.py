@@ -1,4 +1,3 @@
-
 from flask import Flask, request, jsonify
 import os
 import subprocess
@@ -21,7 +20,6 @@ from scanner import SecurityScanner, ScanConfig, scan_repository_handler
 from api import api, analysis_bp
 from gitlab_api import gitlab_api
 
-# Load environment variables in development
 if os.getenv('FLASK_ENV') != 'production':
     load_dotenv()
 
@@ -32,38 +30,36 @@ app.register_blueprint(api)
 app.register_blueprint(analysis_bp)
 app.register_blueprint(gitlab_api)
 
-# Create an event loop for async operations
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO if os.getenv('FLASK_ENV') == 'production' else logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# Configure database
+# Database Configuration
 DATABASE_URL = os.getenv('DATABASE_URL')
 GITLAB_DATABASE_URL = os.getenv('GITLAB_DATABASE_URL')
+
 if DATABASE_URL and DATABASE_URL.startswith('postgres://'):
     DATABASE_URL = DATABASE_URL.replace('postgres://', 'postgresql://', 1)
 
 if GITLAB_DATABASE_URL and GITLAB_DATABASE_URL.startswith('postgres://'):
     GITLAB_DATABASE_URL = GITLAB_DATABASE_URL.replace('postgres://', 'postgresql://', 1)
 
-
 if not DATABASE_URL:
     DATABASE_URL = 'postgresql://postgres:postgres@localhost:5432/semgrep_analysis'
+    
+
 
 app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
 app.config['SQLALCHEMY_BINDS'] = {
-    'gitlab': GITLAB_DATABASE_URL  # Configure GitLab database as a separate bind
+    'gitlab': GITLAB_DATABASE_URL
 }
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-
-# Add SSL configuration if using SSL
 if os.getenv('FLASK_ENV') == 'production':
     app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
         'connect_args': {
@@ -79,20 +75,23 @@ except Exception as e:
     logger.error(f"Failed to initialize database: {str(e)}")
     raise
 
-# Initialize database and run migrations
+# Database initialization and migrations
 with app.app_context():
     try:
-        # Create tables if they don't exist
-        db.create_all()
-        db.create_all(bind='gitlab')
-        logger.info("Database tables created successfully!")
-
-        # Test database connection
-        db.session.execute(text('SELECT 1'))
-        db.session.execute(text('SELECT 1').execution_options(bind='gitlab'))
-        db.session.commit()
-        logger.info("Both database connections successful")
+        # Create tables in both databases
+        db.create_all()  # For GitHub database
         
+        # For GitLab database
+        if GITLAB_DATABASE_URL:
+            gitlab_engine = db.get_engine(app, bind='gitlab')
+            db.Model.metadata.create_all(bind=gitlab_engine)
+        
+        # Test connections
+        db.session.execute(text('SELECT 1'))
+        if GITLAB_DATABASE_URL:
+            db.session.execute(text('SELECT 1').execution_options(bind='gitlab'))
+        db.session.commit()
+        logger.info("Database connections successful")
         
         # Check and add user_id column
         try:
@@ -104,13 +103,11 @@ with app.app_context():
             column_exists = bool(result.scalar())
             
             if not column_exists:
-                # Add user_id column directly
                 logger.info("Adding user_id column...")
                 db.session.execute(text("""
                     ALTER TABLE analysis_results 
                     ADD COLUMN IF NOT EXISTS user_id VARCHAR(255)
                 """))
-                # Add index on user_id
                 db.session.execute(text("""
                     CREATE INDEX IF NOT EXISTS ix_analysis_results_user_id 
                     ON analysis_results (user_id)
@@ -129,7 +126,6 @@ with app.app_context():
             rerank_exists = bool(result.scalar())
             
             if not rerank_exists:
-                # Add rerank column
                 logger.info("Adding rerank column...")
                 db.session.execute(text("""
                     ALTER TABLE analysis_results 
@@ -150,20 +146,19 @@ with app.app_context():
     finally:
         db.session.remove()
 
-
 @app.cli.command("create-gitlab-db")
 def create_gitlab_db():
     """Create GitLab database tables."""
     with app.app_context():
-        db.create_all(bind='gitlab')
+        gitlab_engine = db.get_engine(app, bind='gitlab')
+        db.Model.metadata.create_all(bind=gitlab_engine)
 
 @app.cli.command("drop-gitlab-db")
 def drop_gitlab_db():
     """Drop GitLab database tables."""
     with app.app_context():
-        db.drop_all(bind='gitlab')
-
-
+        gitlab_engine = db.get_engine(app, bind='gitlab')
+        db.Model.metadata.drop_all(bind=gitlab_engine)
 def format_private_key(key_data):
     """Format the private key correctly for GitHub integration"""
     try:
