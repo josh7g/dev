@@ -8,6 +8,8 @@ import os
 import ssl
 import fnmatch
 import logging
+import aiohttp
+import traceback
 from pathlib import Path
 import asyncio
 import logging
