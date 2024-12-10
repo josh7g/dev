@@ -85,9 +85,10 @@ async def gitlab_oauth_callback():
         if repos_response.status_code == 200:
             repositories = repos_response.json()
             
-            # Return the list of repositories to the user
+            # Return the list of repositories
             return jsonify({
-                'message': 'Please select a repository to scan',
+                'success': True,
+                'user_id': user_id,
                 'repositories': repositories
             })
         else:
@@ -145,6 +146,7 @@ async def select_repository_for_scan():
         logger.info(f"Updated analysis record {analysis.id} with scan results")
 
         return jsonify({
+            'success': True,
             'message': 'Scan initiated for selected repository',
             'scan_result': scan_result
         })
