@@ -96,6 +96,26 @@ async def gitlab_oauth_callback():
                 db_session = Session()
                 
                 try:
+                    # Create initial analysis record
+                    analysis = GitLabAnalysisResult(
+                        project_id=str(repo['id']),
+                        project_url=repo['web_url'],
+                        user_id=user_id,
+                        status='in_progress',
+                        timestamp=datetime.now()
+                    )
+                    db_session.add(analysis)
+                    db_session.commit()
+                    logger.info(f"Created analysis record with ID: {analysis.id}")
+
+                    # Create scanner with analysis ID
+                    config = GitLabScanConfig()
+                    scanner = GitLabSecurityScanner(
+                        config=config,
+                        db_session=db_session,
+                        analysis_id=analysis.id
+                    )
+                    
                     scan_result = await scan_gitlab_repository_handler(
                         project_url=repo['web_url'],
                         access_token=access_token,
@@ -106,7 +126,8 @@ async def gitlab_oauth_callback():
                     return jsonify({
                         'message': 'Authorization successful and scan initiated',
                         'repository': repo['path_with_namespace'],
-                        'scan_result': scan_result
+                        'scan_result': scan_result,
+                        'analysis_id': analysis.id
                     })
                 finally:
                     db_session.close()
@@ -118,6 +139,7 @@ async def gitlab_oauth_callback():
     except Exception as e:
         logger.error(f"GitLab OAuth callback error: {str(e)}")
         return jsonify({'error': str(e)}), 500
+    
 
 
 @gitlab_api.route('/repositories', methods=['GET'])
