@@ -15,7 +15,6 @@ from typing import Dict, Any, List
 from datetime import datetime
 import json
 import requests
-import redirect 
 
 logging.basicConfig(
     level=logging.INFO,
