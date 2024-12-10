@@ -581,7 +581,8 @@ async def scan_gitlab_repository_handler(
         config = GitLabScanConfig()
         async with GitLabSecurityScanner(config, db_session) as scanner:
             try:
-                project_id = scanner._extract_project_id(project_url)
+                # Pass access_token here when extracting project_id
+                project_id = scanner._extract_project_id(project_url, access_token)
                 size_info = await scanner._check_repository_size(project_id, access_token)
                 
                 if not size_info['is_compatible']:
