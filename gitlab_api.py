@@ -120,7 +120,7 @@ async def gitlab_oauth_callback():
 
 @gitlab_api.route('/repositories/<repo_id>/scan', methods=['POST'])
 async def trigger_specific_repository_scan(repo_id):
-    """Trigger a security scan for a specific repository with proper database updates"""
+    """Trigger a security scan for a specific repository with LLM reranking"""
     logger.info(f"Starting scan for repository ID: {repo_id}")
     db_session = None
     analysis = None
@@ -184,44 +184,95 @@ async def trigger_specific_repository_scan(repo_id):
             logger.info(f"Scan completed with success status: {scan_result.get('success', False)}")
 
             if scan_result.get('success'):
-                logger.info("Updating analysis record with scan results")
-                # Create results dictionary with all necessary data
-                results_data = {
-                    'findings': scan_result['data'].get('findings', []),
-                    'summary': scan_result['data'].get('summary', {}),
-                    'metadata': scan_result['data'].get('metadata', {}),
-                    'repository_info': scan_result['data'].get('repository_info', {}),
-                    'timestamp': datetime.utcnow().isoformat(),
-                    'project_id': repo_id,
-                    'project_url': project_url,
-                    'user_id': user_id
+                # Get findings and add IDs
+                findings = scan_result['data'].get('findings', [])
+                for idx, finding in enumerate(findings, 1):
+                    finding['ID'] = idx
+
+                # Prepare simplified data for LLM
+                llm_data = {
+                    'findings': [{
+                        "ID": finding["ID"],
+                        "file": finding["file"],
+                        "code_snippet": finding["code_snippet"],
+                        "message": finding["message"],
+                        "severity": finding["severity"]
+                    } for finding in findings],
+                    'metadata': {
+                        'project_id': repo_id,
+                        'user_id': user_id,
+                        'timestamp': datetime.utcnow().isoformat(),
+                        'scan_id': analysis.id
+                    }
                 }
-                
-                # Update the analysis record
-                analysis.status = 'completed'
-                analysis.results = results_data  # This should be a JSON-serializable dictionary
-                db_session.add(analysis)  # Explicitly add the updated record
-                db_session.commit()
-                logger.info(f"Successfully updated analysis record {analysis.id} with results")
-                
-                # Verify the update
-                db_session.refresh(analysis)
-                logger.info(f"Verified results saved. Results size: {len(str(analysis.results))} bytes")
+
+                # Send to AI reranking service
+                AI_RERANK_URL = os.getenv('RERANK_API_URL')
+                if not AI_RERANK_URL:
+                    raise ValueError("RERANK_API_URL not configured")
+
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(AI_RERANK_URL, json=llm_data) as response:
+                        if response.status == 200:
+                            response_data = await response.json()
+                            logger.info(f"LLM Response: {response_data.get('llm_response', '')}")
+                            
+                            reranked_ids = extract_ids_from_llm_response(response_data)
+                            if reranked_ids:
+                                findings_map = {finding['ID']: finding for finding in findings}
+                                reordered_findings = [findings_map[id] for id in reranked_ids]
+                                
+                                # Store original results
+                                results_data = {
+                                    'findings': findings,
+                                    'summary': scan_result['data'].get('summary', {}),
+                                    'metadata': scan_result['data'].get('metadata', {}),
+                                    'repository_info': scan_result['data'].get('repository_info', {}),
+                                    'timestamp': datetime.utcnow().isoformat(),
+                                    'project_id': repo_id,
+                                    'project_url': project_url,
+                                    'user_id': user_id
+                                }
+                                
+                                # Update analysis with both original and reranked results
+                                analysis.status = 'completed'
+                                analysis.results = results_data
+                                analysis.rerank = reordered_findings
+                                db_session.add(analysis)
+                                db_session.commit()
+                                
+                                # Add reranked findings to response
+                                scan_result['data']['reranked_findings'] = reordered_findings
+                            else:
+                                logger.warning("Could not extract IDs from LLM response, using original order")
+                                analysis.status = 'completed'
+                                analysis.results = scan_result['data']
+                                analysis.rerank = findings
+                                db_session.add(analysis)
+                                db_session.commit()
+                                scan_result['data']['reranked_findings'] = findings
+                        else:
+                            logger.error(f"AI reranking failed: {await response.text()}")
+                            analysis.status = 'reranking_failed'
+                            analysis.error = "Reranking failed"
+                            db_session.commit()
+
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'analysis_id': analysis.id,
+                        'repository': repo_data['path_with_namespace'],
+                        'scan_result': scan_result,
+                        'status': analysis.status
+                    }
+                })
+
             else:
                 logger.error(f"Scan failed with error: {scan_result.get('error', {})}")
                 analysis.status = 'failed'
                 analysis.error = str(scan_result.get('error', {}))
                 db_session.commit()
-
-            return jsonify({
-                'success': True,
-                'data': {
-                    'analysis_id': analysis.id,
-                    'repository': repo_data['path_with_namespace'],
-                    'scan_result': scan_result,
-                    'status': analysis.status
-                }
-            })
+                return jsonify(scan_result), 500
 
         except Exception as inner_e:
             logger.error(f"Error during scan process: {str(inner_e)}")
