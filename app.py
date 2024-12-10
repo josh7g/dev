@@ -43,6 +43,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Database Configuration
+# Database Configuration
 DATABASE_URL = os.getenv('DATABASE_URL')
 GITLAB_DATABASE_URL = os.getenv('GITLAB_DATABASE_URL')
 
@@ -57,12 +58,11 @@ app.config['SQLALCHEMY_BINDS'] = {
     'gitlab': GITLAB_DATABASE_URL
 }
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+# Updated SSL configuration
 app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
     'connect_args': {
-        'sslmode': 'require',
-        'ssl': {
-            'ssl_cert_reqs': ssl.CERT_NONE  
-        }
+        'sslmode': 'require'
     }
 }
 
@@ -70,10 +70,7 @@ app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
 app.config['SQLALCHEMY_BIND_OPTIONS'] = {
     'gitlab': {
         'connect_args': {
-            'sslmode': 'require',
-            'ssl': {
-                'ssl_cert_reqs': ssl.CERT_NONE
-            }
+            'sslmode': 'require'
         }
     }
 }
@@ -82,13 +79,8 @@ app.config['SQLALCHEMY_BIND_OPTIONS'] = {
 try:
     db.init_app(app)
     logger.info("Database initialization successful")
-except Exception as e:
-    logger.error(f"Failed to initialize database: {str(e)}")
-    raise
-
-# Database initialization and migrations
-with app.app_context():
-    try:
+    
+    with app.app_context():
         # Create tables in both databases
         db.create_all()  # For GitHub database
         
@@ -104,8 +96,9 @@ with app.app_context():
         db.session.commit()
         logger.info("Database connections successful")
         
-        # Check and add user_id column
+        # Check and add columns
         try:
+            # Check for user_id column
             result = db.session.execute(text("""
                 SELECT column_name 
                 FROM information_schema.columns 
@@ -128,7 +121,7 @@ with app.app_context():
             else:
                 logger.info("user_id column already exists")
 
-            # Check and add rerank column
+            # Check for rerank column
             result = db.session.execute(text("""
                 SELECT column_name 
                 FROM information_schema.columns 
@@ -150,13 +143,12 @@ with app.app_context():
         except Exception as column_error:
             logger.error(f"Error managing columns: {str(column_error)}")
             db.session.rollback()
+            raise
 
-    except Exception as e:
-        logger.error(f"Database initialization error: {str(e)}")
-        logger.error(traceback.format_exc())
-    finally:
-        db.session.remove()
-
+except Exception as e:
+    logger.error(f"Database initialization error: {str(e)}")
+    logger.error(traceback.format_exc())
+    raise
 @app.cli.command("create-gitlab-db")
 def create_gitlab_db():
     """Create GitLab database tables."""
