@@ -138,7 +138,6 @@ async def trigger_specific_repository_scan(repo_id):
         access_token = data.get('access_token')
         user_id = data.get('user_id')
         
-        # Get repository details
         logger.info(f"Fetching repository details for ID: {repo_id}")
         headers = {'Authorization': f"Bearer {access_token}"}
         repo_response = requests.get(
@@ -157,13 +156,13 @@ async def trigger_specific_repository_scan(repo_id):
         project_url = repo_data['web_url']
         logger.info(f"Successfully fetched repository details: {json.dumps(repo_data, indent=2)}")
 
-        # Set up database
+        # Create database session
         engine = db.get_engine(current_app, bind='gitlab')
         Session = sessionmaker(bind=engine)
         db_session = Session()
 
         try:
-            # Create initial record
+            # Create initial analysis record
             analysis = GitLabAnalysisResult(
                 project_id=str(repo_id),
                 project_url=project_url,
@@ -175,7 +174,7 @@ async def trigger_specific_repository_scan(repo_id):
             db_session.commit()
             logger.info(f"Created analysis record with ID: {analysis.id}")
 
-            # Run the scan
+            # Trigger the scan
             logger.info("Starting repository scan...")
             scan_result = await scan_gitlab_repository_handler(
                 project_url=project_url,
@@ -187,15 +186,14 @@ async def trigger_specific_repository_scan(repo_id):
             logger.info(f"Scan completed with success status: {scan_result.get('success', False)}")
 
             if scan_result.get('success'):
+                # Get findings and add IDs
                 findings = scan_result['data'].get('findings', [])
-                
-                # Add IDs to findings
                 for idx, finding in enumerate(findings, 1):
                     finding['ID'] = idx
 
                 logger.info(f"Processing {len(findings)} findings for LLM reranking")
 
-                # Prepare LLM data
+                # Prepare data for LLM
                 llm_data = {
                     'findings': [{
                         "ID": finding["ID"],
@@ -213,7 +211,7 @@ async def trigger_specific_repository_scan(repo_id):
                     }
                 }
 
-                # Log LLM request data
+                # Log what we're sending
                 logger.info("Data being sent to LLM:")
                 logger.info(f"Total findings: {len(llm_data['findings'])}")
                 logger.info(f"Metadata: {json.dumps(llm_data['metadata'], indent=2)}")
@@ -243,10 +241,22 @@ async def trigger_specific_repository_scan(repo_id):
                             logger.info(f"Extracted reranked IDs: {reranked_ids}")
                             
                             if reranked_ids:
+                                # Create map of ID to finding
                                 findings_map = {finding['ID']: finding for finding in findings}
-                                reordered_findings = [findings_map[id] for id in reranked_ids]
                                 
-                                # Store results
+                                # Create new list following exact LLM sequence
+                                reordered_findings = []
+                                for rank_id in reranked_ids:
+                                    if rank_id in findings_map:
+                                        finding = findings_map[rank_id]
+                                        logger.info(f"Adding finding with ID {rank_id} to reordered list - {finding.get('message')[:50]}...")
+                                        reordered_findings.append(finding)
+                                    else:
+                                        logger.warning(f"ID {rank_id} from LLM response not found in findings")
+                                
+                                logger.info(f"Reordering complete. First few IDs in sequence: {[f['ID'] for f in reordered_findings[:5]]}")
+                                
+                                # Store original results
                                 results_data = {
                                     'findings': findings,
                                     'summary': scan_result['data'].get('summary', {}),
@@ -260,9 +270,10 @@ async def trigger_specific_repository_scan(repo_id):
                                     'timestamp': datetime.utcnow().isoformat()
                                 }
                                 
+                                # Update the analysis record
                                 analysis.status = 'completed'
                                 analysis.results = results_data
-                                analysis.rerank = reordered_findings
+                                analysis.rerank = reordered_findings  # Reranked findings in LLM sequence
                                 db_session.add(analysis)
                                 db_session.commit()
                                 logger.info(f"Successfully updated analysis {analysis.id} with results and reranking")
