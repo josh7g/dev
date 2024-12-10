@@ -102,26 +102,34 @@ async def gitlab_oauth_callback():
                         project_url=repo['web_url'],
                         user_id=user_id,
                         status='in_progress',
-                        timestamp=datetime.now()
+                        timestamp=datetime.utcnow()
                     )
                     db_session.add(analysis)
                     db_session.commit()
                     logger.info(f"Created analysis record with ID: {analysis.id}")
 
-                    # Create scanner with analysis ID
-                    config = GitLabScanConfig()
-                    scanner = GitLabSecurityScanner(
-                        config=config,
+                    scan_config = GitLabScanConfig()
+                    async with GitLabSecurityScanner(
+                        config=scan_config,
                         db_session=db_session,
                         analysis_id=analysis.id
-                    )
-                    
-                    scan_result = await scan_gitlab_repository_handler(
-                        project_url=repo['web_url'],
-                        access_token=access_token,
-                        user_id=user_id,
-                        db_session=db_session
-                    )
+                    ) as scanner:
+                        scan_result = await scanner.scan_repository(
+                            project_url=repo['web_url'],
+                            access_token=access_token,
+                            user_id=user_id
+                        )
+
+                        if scan_result['success']:
+                            # Update the analysis record with results
+                            analysis.results = scan_result['data']
+                            analysis.status = 'completed'
+                        else:
+                            analysis.status = 'failed'
+                            analysis.error = scan_result.get('error', {}).get('message', 'Unknown error')
+                            
+                        db_session.commit()
+                        logger.info(f"Updated analysis record {analysis.id} with scan results")
                     
                     return jsonify({
                         'message': 'Authorization successful and scan initiated',
