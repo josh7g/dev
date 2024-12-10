@@ -1,3 +1,4 @@
+#gitlab_scanner.py
 import os
 import subprocess
 import logging
@@ -170,7 +171,7 @@ class GitLabSecurityScanner:
     async def _clone_repository(self, project_url: str, access_token: str) -> Path:
         """Clone repository with size validation and optimizations"""
         try:
-            project_id = self._extract_project_id(project_url)
+            project_id = self._extract_project_id(project_url, access_token)  # Pass access_token here
             size_info = await self._check_repository_size(project_id, access_token)
             
             if not size_info['is_compatible']:
@@ -389,9 +390,10 @@ class GitLabSecurityScanner:
     async def scan_repository(self, project_url: str, access_token: str, user_id: str) -> Dict:
         """Main method to scan a repository"""
         try:
+            # Keep track of access_token for project ID extraction
+            project_id = self._extract_project_id(project_url, access_token)
             repo_dir = await self._clone_repository(project_url, access_token)
             scan_results = await self._run_semgrep_scan(repo_dir)
-            project_id = self._extract_project_id(project_url, access_token)  # Pass access_token here
             
             results_data = {
                 'findings': scan_results.get('findings', []),
