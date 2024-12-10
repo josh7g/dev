@@ -135,7 +135,7 @@ class GitLabSecurityScanner:
             logger.info(f"Checking size for project ID: {project_id}")
             
             headers = {
-                'PRIVATE-TOKEN': access_token,
+                'Authorization': f'Bearer {access_token}',
                 'Accept': 'application/json'
             }
             
@@ -162,7 +162,7 @@ class GitLabSecurityScanner:
                     'language': data.get('predominant_language'),
                     'default_branch': data.get('default_branch', 'main')
                 }
-                
+                    
         except Exception as e:
             logger.error(f"Error checking repository size: {str(e)}")
             raise
