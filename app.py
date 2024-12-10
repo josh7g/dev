@@ -21,6 +21,7 @@ from asgiref.wsgi import WsgiToAsgi
 from scanner import SecurityScanner, ScanConfig, scan_repository_handler
 from api import api, analysis_bp
 from gitlab_api import gitlab_api
+import ssl
 
 if os.getenv('FLASK_ENV') != 'production':
     load_dotenv()
@@ -51,21 +52,31 @@ if DATABASE_URL and DATABASE_URL.startswith('postgres://'):
 if GITLAB_DATABASE_URL and GITLAB_DATABASE_URL.startswith('postgres://'):
     GITLAB_DATABASE_URL = GITLAB_DATABASE_URL.replace('postgres://', 'postgresql://', 1)
 
-if not DATABASE_URL:
-    DATABASE_URL = 'postgresql://postgres:postgres@localhost:5432/semgrep_analysis'
-
 app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
 app.config['SQLALCHEMY_BINDS'] = {
     'gitlab': GITLAB_DATABASE_URL
 }
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-
-if os.getenv('FLASK_ENV') == 'production':
-    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-        'connect_args': {
-            'sslmode': 'require'
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+    'connect_args': {
+        'sslmode': 'require',
+        'ssl': {
+            'ssl_cert_reqs': ssl.CERT_NONE  
         }
     }
+}
+
+# For GitLab database specifically
+app.config['SQLALCHEMY_BIND_OPTIONS'] = {
+    'gitlab': {
+        'connect_args': {
+            'sslmode': 'require',
+            'ssl': {
+                'ssl_cert_reqs': ssl.CERT_NONE
+            }
+        }
+    }
+}
 
 # Initialize database
 try:
