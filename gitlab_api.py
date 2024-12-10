@@ -119,7 +119,7 @@ async def gitlab_oauth_callback():
         return jsonify({'error': str(e)}), 500
 
 @gitlab_api.route('/repositories/<repo_id>/scan', methods=['POST'])
-async def trigger_repository_scan():
+async def trigger_specific_repository_scan(repo_id):
     """Trigger a security scan for a specific repository"""
     try:
         # Get data from request body
@@ -138,7 +138,6 @@ async def trigger_repository_scan():
                 'error': {'message': f'Missing required fields: {", ".join(missing_fields)}'}
             }), 400
 
-        repo_id = request.view_args['repo_id']
         access_token = data['access_token']
         user_id = data['user_id']
 
@@ -529,7 +528,7 @@ def get_user_severity_counts():
         }), 500
 
 @gitlab_api.route('/scan', methods=['POST'])
-async def trigger_repository_scan():
+async def trigger_general_repository_scan():
     """Trigger a semgrep security scan for a GitLab repository"""
     # Get data from POST request body
     request_data = request.get_json()
