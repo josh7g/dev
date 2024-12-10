@@ -37,6 +37,76 @@ def install_app():
     )
     return redirect(gitlab_auth_url)
 
+@gitlab_api.route('/oauth/callback')
+async def gitlab_oauth_callback():
+    """Handle GitLab OAuth callback and trigger initial repository scan"""
+    try:
+        code = request.args.get('code')
+        if not code:
+            return jsonify({'error': 'No code provided'}), 400
+
+        # Exchange code for access token
+        data = {
+            'client_id': os.getenv('GITLAB_APP_ID'),
+            'client_secret': os.getenv('GITLAB_APP_SECRET'),
+            'code': code,
+            'grant_type': 'authorization_code',
+            'redirect_uri': os.getenv('GITLAB_CALLBACK_URL')
+        }
+
+        # Get access token
+        response = requests.post('https://gitlab.com/oauth/token', data=data)
+        if response.status_code != 200:
+            logger.error(f"Failed to get access token: {response.text}")
+            return jsonify({'error': 'Failed to get access token'}), 400
+
+        token_data = response.json()
+        access_token = token_data['access_token']
+
+        # Get user information
+        headers = {'Authorization': f"Bearer {access_token}"}
+        user_response = requests.get('https://gitlab.com/api/v4/user', headers=headers)
+        
+        if user_response.status_code != 200:
+            logger.error(f"Failed to get user information: {user_response.text}")
+            return jsonify({'error': 'Failed to get user information'}), 400
+
+        user_data = user_response.json()
+        user_id = str(user_data['id'])
+
+        # Get user's repositories
+        repos_response = requests.get(
+            'https://gitlab.com/api/v4/projects',
+            headers=headers,
+            params={'membership': True, 'min_access_level': 30}  # 30 = Developer access
+        )
+
+        if repos_response.status_code == 200:
+            repositories = repos_response.json()
+            
+            # Just scan the first repository for now
+            if repositories:
+                repo = repositories[0]
+                await scan_gitlab_repository_handler(
+                    project_url=repo['web_url'],
+                    access_token=access_token,
+                    user_id=user_id,
+                    project_id=str(repo['id'])
+                )
+                return jsonify({
+                    'message': 'Authorization successful and scan initiated',
+                    'repository': repo['path_with_namespace']
+                })
+            else:
+                return jsonify({'message': 'Authorization successful but no repositories found'})
+                
+        return jsonify({'error': 'Failed to fetch repositories'}), 400
+
+    except Exception as e:
+        logger.error(f"GitLab OAuth callback error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
 @gitlab_api.route('/repositories', methods=['GET'])
 def list_repositories():
     """List repositories accessible to the authenticated user"""
