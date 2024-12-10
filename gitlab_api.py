@@ -120,9 +120,12 @@ async def gitlab_oauth_callback():
 
 @gitlab_api.route('/repositories/<repo_id>/scan', methods=['POST'])
 async def trigger_specific_repository_scan(repo_id):
-    """Trigger a security scan for a specific repository"""
+    """Trigger a security scan for a specific repository with proper database updates"""
+    logger.info(f"Starting scan for repository ID: {repo_id}")
+    db_session = None
+    analysis = None
+    
     try:
-        # Get data from request body
         data = request.get_json()
         if not data:
             return jsonify({
@@ -130,18 +133,10 @@ async def trigger_specific_repository_scan(repo_id):
                 'error': {'message': 'Request body is required'}
             }), 400
 
-        required_fields = ['access_token', 'user_id']
-        missing_fields = [field for field in required_fields if field not in data]
-        if missing_fields:
-            return jsonify({
-                'success': False,
-                'error': {'message': f'Missing required fields: {", ".join(missing_fields)}'}
-            }), 400
-
-        access_token = data['access_token']
-        user_id = data['user_id']
-
-        # Get repository details
+        access_token = data.get('access_token')
+        user_id = data.get('user_id')
+        
+        logger.info(f"Fetching repository details for ID: {repo_id}")
         headers = {'Authorization': f"Bearer {access_token}"}
         repo_response = requests.get(
             f'https://gitlab.com/api/v4/projects/{repo_id}',
@@ -149,6 +144,7 @@ async def trigger_specific_repository_scan(repo_id):
         )
 
         if repo_response.status_code != 200:
+            logger.error(f"Failed to fetch repository details: {repo_response.text}")
             return jsonify({
                 'success': False,
                 'error': {'message': 'Repository not found or inaccessible'}
@@ -156,6 +152,7 @@ async def trigger_specific_repository_scan(repo_id):
 
         repo_data = repo_response.json()
         project_url = repo_data['web_url']
+        logger.info(f"Successfully fetched repository details for: {project_url}")
 
         # Create database session
         engine = db.get_engine(current_app, bind='gitlab')
@@ -176,31 +173,77 @@ async def trigger_specific_repository_scan(repo_id):
             logger.info(f"Created analysis record with ID: {analysis.id}")
 
             # Trigger the scan
+            logger.info("Starting repository scan...")
             scan_result = await scan_gitlab_repository_handler(
                 project_url=project_url,
                 access_token=access_token,
                 user_id=user_id,
                 db_session=db_session
             )
+            
+            logger.info(f"Scan completed with success status: {scan_result.get('success', False)}")
+
+            if scan_result.get('success'):
+                logger.info("Updating analysis record with scan results")
+                # Create results dictionary with all necessary data
+                results_data = {
+                    'findings': scan_result['data'].get('findings', []),
+                    'summary': scan_result['data'].get('summary', {}),
+                    'metadata': scan_result['data'].get('metadata', {}),
+                    'repository_info': scan_result['data'].get('repository_info', {}),
+                    'timestamp': datetime.utcnow().isoformat(),
+                    'project_id': repo_id,
+                    'project_url': project_url,
+                    'user_id': user_id
+                }
+                
+                # Update the analysis record
+                analysis.status = 'completed'
+                analysis.results = results_data  # This should be a JSON-serializable dictionary
+                db_session.add(analysis)  # Explicitly add the updated record
+                db_session.commit()
+                logger.info(f"Successfully updated analysis record {analysis.id} with results")
+                
+                # Verify the update
+                db_session.refresh(analysis)
+                logger.info(f"Verified results saved. Results size: {len(str(analysis.results))} bytes")
+            else:
+                logger.error(f"Scan failed with error: {scan_result.get('error', {})}")
+                analysis.status = 'failed'
+                analysis.error = str(scan_result.get('error', {}))
+                db_session.commit()
 
             return jsonify({
                 'success': True,
                 'data': {
                     'analysis_id': analysis.id,
                     'repository': repo_data['path_with_namespace'],
-                    'scan_result': scan_result
+                    'scan_result': scan_result,
+                    'status': analysis.status
                 }
             })
 
-        finally:
-            db_session.close()
+        except Exception as inner_e:
+            logger.error(f"Error during scan process: {str(inner_e)}")
+            logger.error(traceback.format_exc())
+            if analysis:
+                analysis.status = 'failed'
+                analysis.error = str(inner_e)
+                db_session.commit()
+            raise
 
     except Exception as e:
-        logger.error(f"Error triggering scan: {str(e)}")
+        logger.error(f"Error in scan endpoint: {str(e)}")
+        logger.error(traceback.format_exc())
         return jsonify({
             'success': False,
             'error': {'message': str(e)}
         }), 500
+        
+    finally:
+        if db_session:
+            db_session.close()
+            logger.info("Database session closed")
 
     
 
