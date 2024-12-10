@@ -138,6 +138,7 @@ async def trigger_specific_repository_scan(repo_id):
         access_token = data.get('access_token')
         user_id = data.get('user_id')
         
+        # Get repository details
         logger.info(f"Fetching repository details for ID: {repo_id}")
         headers = {'Authorization': f"Bearer {access_token}"}
         repo_response = requests.get(
@@ -154,15 +155,15 @@ async def trigger_specific_repository_scan(repo_id):
 
         repo_data = repo_response.json()
         project_url = repo_data['web_url']
-        logger.info(f"Successfully fetched repository details for: {project_url}")
+        logger.info(f"Successfully fetched repository details: {json.dumps(repo_data, indent=2)}")
 
-        # Create database session
+        # Set up database
         engine = db.get_engine(current_app, bind='gitlab')
         Session = sessionmaker(bind=engine)
         db_session = Session()
 
         try:
-            # Create initial analysis record
+            # Create initial record
             analysis = GitLabAnalysisResult(
                 project_id=str(repo_id),
                 project_url=project_url,
@@ -174,7 +175,7 @@ async def trigger_specific_repository_scan(repo_id):
             db_session.commit()
             logger.info(f"Created analysis record with ID: {analysis.id}")
 
-            # Trigger the scan
+            # Run the scan
             logger.info("Starting repository scan...")
             scan_result = await scan_gitlab_repository_handler(
                 project_url=project_url,
@@ -186,13 +187,15 @@ async def trigger_specific_repository_scan(repo_id):
             logger.info(f"Scan completed with success status: {scan_result.get('success', False)}")
 
             if scan_result.get('success'):
-                # Get findings and add IDs
                 findings = scan_result['data'].get('findings', [])
+                
+                # Add IDs to findings
                 for idx, finding in enumerate(findings, 1):
                     finding['ID'] = idx
 
-                # Prepare data for LLM
-                logger.info("Preparing data for LLM reranking...")
+                logger.info(f"Processing {len(findings)} findings for LLM reranking")
+
+                # Prepare LLM data
                 llm_data = {
                     'findings': [{
                         "ID": finding["ID"],
@@ -202,8 +205,7 @@ async def trigger_specific_repository_scan(repo_id):
                         "severity": finding["severity"]
                     } for finding in findings],
                     'metadata': {
-                        'repository': repo_data['path_with_namespace'],  # This matches what LLM expects
-                        'project_id': repo_id,
+                        'repository': repo_data['path_with_namespace'],
                         'project_url': project_url,
                         'user_id': user_id,
                         'timestamp': datetime.utcnow().isoformat(),
@@ -212,14 +214,14 @@ async def trigger_specific_repository_scan(repo_id):
                 }
 
                 # Log LLM request data
-                logger.info(f"Data being sent to LLM:")
+                logger.info("Data being sent to LLM:")
                 logger.info(f"Total findings: {len(llm_data['findings'])}")
                 logger.info(f"Metadata: {json.dumps(llm_data['metadata'], indent=2)}")
-                logger.info("Sample findings (first 2):")
-                for finding in llm_data['findings'][:2]:
-                    logger.info(json.dumps(finding, indent=2))
+                if llm_data['findings']:
+                    logger.info("Sample finding:")
+                    logger.info(json.dumps(llm_data['findings'][0], indent=2))
 
-                # Send to AI reranking service
+                # Send to LLM service
                 AI_RERANK_URL = os.getenv('RERANK_API_URL')
                 if not AI_RERANK_URL:
                     raise ValueError("RERANK_API_URL not configured")
@@ -244,19 +246,20 @@ async def trigger_specific_repository_scan(repo_id):
                                 findings_map = {finding['ID']: finding for finding in findings}
                                 reordered_findings = [findings_map[id] for id in reranked_ids]
                                 
-                                # Store original results
+                                # Store results
                                 results_data = {
                                     'findings': findings,
                                     'summary': scan_result['data'].get('summary', {}),
                                     'metadata': scan_result['data'].get('metadata', {}),
-                                    'repository_info': scan_result['data'].get('repository_info', {}),
-                                    'timestamp': datetime.utcnow().isoformat(),
-                                    'project_id': repo_id,
-                                    'project_url': project_url,
-                                    'user_id': user_id
+                                    'repository_info': {
+                                        'id': repo_id,
+                                        'url': project_url,
+                                        'path': repo_data['path_with_namespace'],
+                                        'default_branch': repo_data.get('default_branch', 'main')
+                                    },
+                                    'timestamp': datetime.utcnow().isoformat()
                                 }
                                 
-                                # Update analysis with both original and reranked results
                                 analysis.status = 'completed'
                                 analysis.results = results_data
                                 analysis.rerank = reordered_findings
@@ -264,10 +267,9 @@ async def trigger_specific_repository_scan(repo_id):
                                 db_session.commit()
                                 logger.info(f"Successfully updated analysis {analysis.id} with results and reranking")
                                 
-                                # Add reranked findings to response
                                 scan_result['data']['reranked_findings'] = reordered_findings
                             else:
-                                logger.warning("Could not extract IDs from LLM response, using original order")
+                                logger.warning("No reranking IDs received, using original order")
                                 analysis.status = 'completed'
                                 analysis.results = scan_result['data']
                                 analysis.rerank = findings
