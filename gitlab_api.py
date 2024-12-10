@@ -818,16 +818,27 @@ async def trigger_general_repository_scan():
 def extract_ids_from_llm_response(response_data):
     """Extract IDs from LLM response text"""
     try:
+        logger.info("Extracting IDs from LLM response")
         if isinstance(response_data, dict) and 'llm_response' in response_data:
+            # If llm_response is already a list, use it directly
+            if isinstance(response_data['llm_response'], list):
+                logger.info(f"Found ID list: {response_data['llm_response']}")
+                return response_data['llm_response']
+            
+            # If it's a string (the old format), try to parse it
             response_text = response_data['llm_response']
-            import re
-            array_match = re.search(r'\[([\d,\s]+)\]', response_text)
-            if array_match:
-                id_string = array_match.group(1)
-                return [int(id.strip()) for id in id_string.split(',')]
+            if isinstance(response_text, str):
+                import re
+                array_match = re.search(r'\[([\d,\s]+)\]', response_text)
+                if array_match:
+                    id_string = array_match.group(1)
+                    return [int(id.strip()) for id in id_string.split(',')]
+                    
+        logger.warning("Could not find valid ID list in response")
         return None
     except Exception as e:
         logger.error(f"Error extracting IDs from LLM response: {str(e)}")
+        logger.error(f"Response data: {json.dumps(response_data, indent=2)}")
         return None
 
 @gitlab_api.route('/projects/<project_id>/analysis/reranked', methods=['GET'])
