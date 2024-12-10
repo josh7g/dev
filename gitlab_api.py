@@ -1,4 +1,4 @@
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request,redirect
 from sqlalchemy import func, desc, create_engine
 from sqlalchemy.orm import sessionmaker
 from models import db, GitLabAnalysisResult
