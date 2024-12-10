@@ -191,7 +191,8 @@ async def trigger_specific_repository_scan(repo_id):
                 for idx, finding in enumerate(findings, 1):
                     finding['ID'] = idx
 
-                # Prepare simplified data for LLM
+                # Prepare data for LLM
+                logger.info("Preparing data for LLM reranking...")
                 llm_data = {
                     'findings': [{
                         "ID": finding["ID"],
@@ -201,12 +202,22 @@ async def trigger_specific_repository_scan(repo_id):
                         "severity": finding["severity"]
                     } for finding in findings],
                     'metadata': {
+                        'repository': repo_data['path_with_namespace'],  # This matches what LLM expects
                         'project_id': repo_id,
+                        'project_url': project_url,
                         'user_id': user_id,
                         'timestamp': datetime.utcnow().isoformat(),
                         'scan_id': analysis.id
                     }
                 }
+
+                # Log LLM request data
+                logger.info(f"Data being sent to LLM:")
+                logger.info(f"Total findings: {len(llm_data['findings'])}")
+                logger.info(f"Metadata: {json.dumps(llm_data['metadata'], indent=2)}")
+                logger.info("Sample findings (first 2):")
+                for finding in llm_data['findings'][:2]:
+                    logger.info(json.dumps(finding, indent=2))
 
                 # Send to AI reranking service
                 AI_RERANK_URL = os.getenv('RERANK_API_URL')
@@ -214,12 +225,21 @@ async def trigger_specific_repository_scan(repo_id):
                     raise ValueError("RERANK_API_URL not configured")
 
                 async with aiohttp.ClientSession() as session:
+                    logger.info(f"Sending request to LLM at: {AI_RERANK_URL}")
                     async with session.post(AI_RERANK_URL, json=llm_data) as response:
-                        if response.status == 200:
-                            response_data = await response.json()
-                            logger.info(f"LLM Response: {response_data.get('llm_response', '')}")
+                        response_status = response.status
+                        response_text = await response.text()
+                        
+                        logger.info(f"LLM Response Status: {response_status}")
+                        logger.info(f"LLM Raw Response: {response_text}")
+                        
+                        if response_status == 200:
+                            response_data = json.loads(response_text)
+                            logger.info(f"LLM Processed Response: {json.dumps(response_data, indent=2)}")
                             
                             reranked_ids = extract_ids_from_llm_response(response_data)
+                            logger.info(f"Extracted reranked IDs: {reranked_ids}")
+                            
                             if reranked_ids:
                                 findings_map = {finding['ID']: finding for finding in findings}
                                 reordered_findings = [findings_map[id] for id in reranked_ids]
@@ -242,6 +262,7 @@ async def trigger_specific_repository_scan(repo_id):
                                 analysis.rerank = reordered_findings
                                 db_session.add(analysis)
                                 db_session.commit()
+                                logger.info(f"Successfully updated analysis {analysis.id} with results and reranking")
                                 
                                 # Add reranked findings to response
                                 scan_result['data']['reranked_findings'] = reordered_findings
@@ -254,7 +275,7 @@ async def trigger_specific_repository_scan(repo_id):
                                 db_session.commit()
                                 scan_result['data']['reranked_findings'] = findings
                         else:
-                            logger.error(f"AI reranking failed: {await response.text()}")
+                            logger.error(f"AI reranking failed: {response_text}")
                             analysis.status = 'reranking_failed'
                             analysis.error = "Reranking failed"
                             db_session.commit()
@@ -297,7 +318,6 @@ async def trigger_specific_repository_scan(repo_id):
         if db_session:
             db_session.close()
             logger.info("Database session closed")
-
     
 
 
