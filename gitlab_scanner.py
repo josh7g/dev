@@ -358,7 +358,7 @@ class GitLabSecurityScanner:
             'errors': [error] if error else []
         }
 
-    def _extract_project_id(self, project_url: str) -> int:
+    def _extract_project_id(self, project_url: str, access_token: str) -> int:
         """Extract GitLab project ID from URL or path"""
         try:
             # Handle both URL and path formats
@@ -369,7 +369,7 @@ class GitLabSecurityScanner:
             
             # Make API call to get project ID
             url = f"https://gitlab.com/api/v4/projects/{path.replace('/', '%2F')}"
-            headers = {'PRIVATE-TOKEN': self.access_token}
+            headers = {'PRIVATE-TOKEN': access_token}
             response = requests.get(url, headers=headers)
             if response.status_code == 200:
                 return response.json()['id']
@@ -382,7 +382,7 @@ class GitLabSecurityScanner:
         try:
             repo_dir = await self._clone_repository(project_url, access_token)
             scan_results = await self._run_semgrep_scan(repo_dir)
-            project_id = self._extract_project_id(project_url)
+            project_id = self._extract_project_id(project_url, access_token)  # Pass access_token here
             
             results_data = {
                 'findings': scan_results.get('findings', []),
