@@ -15,6 +15,7 @@ from typing import Dict, Any, List
 from datetime import datetime
 import json
 import requests
+import redirect 
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,6 +25,44 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 gitlab_api = Blueprint('gitlab_api', __name__, url_prefix='/api/v1/gitlab')
+
+@gitlab_api.route('/install', methods=['GET'])
+def install_app():
+    """Redirect to GitLab OAuth page"""
+    gitlab_auth_url = (
+        f"https://gitlab.com/oauth/authorize?"
+        f"client_id={os.getenv('GITLAB_APP_ID')}&"
+        f"redirect_uri={os.getenv('GITLAB_CALLBACK_URL')}&"
+        f"response_type=code&"
+        f"scope=api+read_repository"
+    )
+    return redirect(gitlab_auth_url)
+
+@gitlab_api.route('/repositories', methods=['GET'])
+def list_repositories():
+    """List repositories accessible to the authenticated user"""
+    access_token = request.headers.get('Authorization')
+    if not access_token:
+        return jsonify({'error': 'Authorization token required'}), 401
+
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Accept': 'application/json'
+    }
+    
+    response = requests.get(
+        'https://gitlab.com/api/v4/projects',
+        headers=headers,
+        params={'membership': True}
+    )
+    
+    if response.status_code == 200:
+        repositories = response.json()
+        return jsonify({
+            'success': True,
+            'data': repositories
+        })
+    return jsonify({'error': 'Failed to fetch repositories'}), response.status_code
 
 @gitlab_api.route('/files', methods=['POST'])
 def get_vulnerable_file():

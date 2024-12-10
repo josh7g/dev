@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, redirect
 import os
 import subprocess
 import logging
@@ -15,6 +15,7 @@ from models import db, AnalysisResult
 from sqlalchemy import or_, text
 import traceback
 import requests
+from urllib.parse import urlencode
 from asgiref.wsgi import WsgiToAsgi
 from scanner import SecurityScanner, ScanConfig, scan_repository_handler
 from api import api, analysis_bp
@@ -51,8 +52,6 @@ if GITLAB_DATABASE_URL and GITLAB_DATABASE_URL.startswith('postgres://'):
 
 if not DATABASE_URL:
     DATABASE_URL = 'postgresql://postgres:postgres@localhost:5432/semgrep_analysis'
-    
-
 
 app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
 app.config['SQLALCHEMY_BINDS'] = {
@@ -159,6 +158,7 @@ def drop_gitlab_db():
     with app.app_context():
         gitlab_engine = db.get_engine(app, bind='gitlab')
         db.Model.metadata.drop_all(bind=gitlab_engine)
+
 def format_private_key(key_data):
     """Format the private key correctly for GitHub integration"""
     try:
@@ -197,12 +197,9 @@ def format_private_key(key_data):
     except Exception as e:
         logger.error(f"Error formatting private key: {str(e)}")
         raise ValueError(f"Private key formatting failed: {str(e)}")
-        
-#Webhook handler
+
 def verify_webhook_signature(request_data, signature_header):
-    """
-    Enhanced webhook signature verification for GitHub webhooks
-    """
+    """Enhanced webhook signature verification for GitHub webhooks"""
     try:
         webhook_secret = os.getenv('GITHUB_WEBHOOK_SECRET')
         
@@ -220,18 +217,14 @@ def verify_webhook_signature(request_data, signature_header):
             logger.error("Signature header doesn't start with sha256=")
             return False
             
-        # Get the raw signature without 'sha256=' prefix
         received_signature = signature_header.replace('sha256=', '')
         
-        # Ensure webhook_secret is bytes
         if isinstance(webhook_secret, str):
             webhook_secret = webhook_secret.strip().encode('utf-8')
             
-        # Ensure request_data is bytes
         if isinstance(request_data, str):
             request_data = request_data.encode('utf-8')
             
-        # Calculate expected signature
         mac = hmac.new(
             webhook_secret,
             msg=request_data,
@@ -239,15 +232,13 @@ def verify_webhook_signature(request_data, signature_header):
         )
         expected_signature = mac.hexdigest()
         
-        # Debug logging
         logger.debug("Signature Details:")
         logger.debug(f"Request Data Length: {len(request_data)} bytes")
         logger.debug(f"Secret Key Length: {len(webhook_secret)} bytes")
-        logger.debug(f"Raw Request Data: {request_data[:100]}...")  # First 100 bytes
+        logger.debug(f"Raw Request Data: {request_data[:100]}...")
         logger.debug(f"Received Header: {signature_header}")
         logger.debug(f"Calculated HMAC: sha256={expected_signature}")
         
-        # Use constant time comparison
         is_valid = hmac.compare_digest(expected_signature, received_signature)
         
         if not is_valid:
@@ -256,9 +247,7 @@ def verify_webhook_signature(request_data, signature_header):
             logger.error(f"Received signature: {received_signature[:10]}...")
             logger.error(f"Expected signature: {expected_signature[:10]}...")
             
-            # Additional debug info
             if os.getenv('FLASK_ENV') != 'production':
-                logger.debug("Full signature comparison:")
                 logger.debug(f"Full received: {received_signature}")
                 logger.debug(f"Full expected: {expected_signature}")
         else:
@@ -270,6 +259,7 @@ def verify_webhook_signature(request_data, signature_header):
         logger.error(f"Signature verification failed: {str(e)}")
         logger.error(traceback.format_exc())
         return False
+
 def verify_gitlab_webhook_signature(request_data, signature_header):
     """Verify GitLab webhook signature"""
     try:
@@ -296,24 +286,70 @@ def gitlab_webhook():
         if not verify_gitlab_webhook_signature(request.get_data(), signature):
             return jsonify({'error': 'Invalid signature'}), 401
 
+        event_type = request.headers.get('X-Gitlab-Event')
         event_data = request.get_json()
-        project_id = event_data.get('project', {}).get('id')
-        project_url = event_data.get('project', {}).get('web_url')
 
-        if not all([project_id, project_url]):
-            return jsonify({'error': 'Missing project information'}), 400
+        if event_type == 'Push Hook':
+            project_id = event_data.get('project', {}).get('id')
+            project_url = event_data.get('project', {}).get('web_url')
+            user_id = event_data.get('user_id')
 
-        # Trigger scan for the repository
-        asyncio.run(scan_gitlab_repository_handler(
-            project_url=project_url,
-            access_token=os.getenv('GITLAB_TOKEN'),
-            user_id=str(project_id)
-        ))
+            if not all([project_id, project_url, user_id]):
+                return jsonify({'error': 'Missing required information'}), 400
+
+            asyncio.run(scan_gitlab_repository_handler(
+                project_url=project_url,
+                access_token=os.getenv('GITLAB_TOKEN'),
+                user_id=str(user_id)
+            ))
 
         return jsonify({'success': True})
 
     except Exception as e:
         logger.error(f"GitLab webhook error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/v1/gitlab/oauth/callback')
+def gitlab_oauth_callback():
+    """Handle GitLab OAuth callback"""
+    try:
+        code = request.args.get('code')
+        if not code:
+            return jsonify({'error': 'No code provided'}), 400
+
+        # Exchange code for access token
+        data = {
+            'client_id': GITLAB_APP_ID,
+            'client_secret': GITLAB_APP_SECRET,
+            'code': code,
+            'grant_type': 'authorization_code',
+            'redirect_uri': GITLAB_CALLBACK_URL
+        }
+
+        response = requests.post('https://gitlab.com/oauth/token', data=data)
+        if response.status_code == 200:
+            token_data = response.json()
+            # Get user information
+            headers = {'Authorization': f"Bearer {token_data['access_token']}"}
+            user_response = requests.get('https://gitlab.com/api/v4/user', headers=headers)
+            
+            if user_response.status_code == 200:
+                user_data = user_response.json()
+                frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:3000')
+                params = urlencode({
+                    'status': 'success',
+                    'user_id': str(user_data['id']),
+                    'platform': 'gitlab',
+                    'access_token': token_data['access_token']
+                })
+                return redirect(f"{frontend_url}/auth/callback?{params}")
+            
+            return jsonify({'error': 'Failed to get user information'}), 400
+        
+        return jsonify({'error': 'Failed to get access token'}), 400
+
+    except Exception as e:
+        logger.error(f"GitLab OAuth error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/debug/test-webhook', methods=['POST'])
@@ -325,10 +361,8 @@ def test_webhook():
             raw_data = request.get_data()
             received_signature = request.headers.get('X-Hub-Signature-256')
             
-            # Test with the exact data received
             result = verify_webhook_signature(raw_data, received_signature)
             
-            # Calculate signature for debugging
             mac = hmac.new(
                 webhook_secret.encode('utf-8') if isinstance(webhook_secret, str) else webhook_secret,
                 msg=raw_data,
@@ -585,12 +619,22 @@ def format_semgrep_results(raw_results):
         }
 
 try:
+    # GitHub Verification
     APP_ID = os.getenv('GITHUB_APP_ID')
     WEBHOOK_SECRET = os.getenv('GITHUB_WEBHOOK_SECRET')
     PRIVATE_KEY = os.getenv('GITHUB_APP_PRIVATE_KEY')
     
+    # GitLab Verification
+    GITLAB_APP_ID = os.getenv('GITLAB_APP_ID')
+    GITLAB_APP_SECRET = os.getenv('GITLAB_APP_SECRET')
+    GITLAB_WEBHOOK_SECRET = os.getenv('GITLAB_WEBHOOK_SECRET')
+    GITLAB_CALLBACK_URL = os.getenv('GITLAB_CALLBACK_URL')
+    
     if not all([APP_ID, WEBHOOK_SECRET, PRIVATE_KEY]):
-        raise ValueError("Missing required environment variables")
+        raise ValueError("Missing required GitHub environment variables")
+    
+    if not all([GITLAB_APP_ID, GITLAB_APP_SECRET, GITLAB_WEBHOOK_SECRET, GITLAB_CALLBACK_URL]):
+        raise ValueError("Missing required GitLab environment variables")
     
     formatted_key = format_private_key(PRIVATE_KEY)
     git_integration = GithubIntegration(
@@ -598,10 +642,10 @@ try:
         private_key=formatted_key,
     )
     logger.info("GitHub Integration initialized successfully")
+    logger.info("GitLab configuration verified successfully")
 except Exception as e:
     logger.error(f"Configuration error: {str(e)}")
     raise
-
 if __name__ == '__main__':
     with app.app_context():
         db.create_all()
