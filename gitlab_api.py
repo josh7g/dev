@@ -18,7 +18,6 @@ import json
 import requests
 from flask import current_app
 
-
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -40,8 +39,9 @@ def install_app():
     )
     return redirect(gitlab_auth_url)
 
-@gitlab_api.route('/gitlab/oauth/callback')
+@gitlab_api.route('/oauth/callback')
 async def gitlab_oauth_callback():
+    """Handle GitLab OAuth callback and return repositories list"""
     try:
         code = request.args.get('code')
         if not code:
@@ -56,6 +56,7 @@ async def gitlab_oauth_callback():
             'redirect_uri': os.getenv('GITLAB_CALLBACK_URL')
         }
 
+        # Get access token
         response = requests.post('https://gitlab.com/oauth/token', data=data)
         if response.status_code != 200:
             logger.error(f"Failed to get access token: {response.text}")
@@ -75,7 +76,7 @@ async def gitlab_oauth_callback():
         user_data = user_response.json()
         user_id = str(user_data['id'])
 
-        # Fetch user's repositories
+        # Get user's repositories
         repos_response = requests.get(
             'https://gitlab.com/api/v4/projects',
             headers=headers,
@@ -85,79 +86,125 @@ async def gitlab_oauth_callback():
         if repos_response.status_code == 200:
             repositories = repos_response.json()
             
-            # Return the list of repositories
+            # Format repository data
+            formatted_repos = [{
+                'id': repo['id'],
+                'name': repo['name'],
+                'full_name': repo['path_with_namespace'],
+                'url': repo['web_url'],
+                'description': repo['description'],
+                'default_branch': repo['default_branch'],
+                'visibility': repo['visibility'],
+                'created_at': repo['created_at'],
+                'last_activity_at': repo['last_activity_at']
+            } for repo in repositories]
+
             return jsonify({
                 'success': True,
-                'user_id': user_id,
-                'repositories': repositories
+                'data': {
+                    'user': {
+                        'id': user_id,
+                        'name': user_data['name'],
+                        'username': user_data['username']
+                    },
+                    'access_token': access_token,
+                    'repositories': formatted_repos
+                }
             })
-        else:
-            return jsonify({'error': 'Failed to fetch repositories'}), repos_response.status_code
+
+        return jsonify({'error': 'Failed to fetch repositories'}), 400
 
     except Exception as e:
-        logger.error(f"GitLab OAuth callback error: {str(e)}")
+        logger.error(f"GitLab OAuth error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
-@gitlab_api.route('/gitlab/select-repository', methods=['POST'])
-async def select_repository_for_scan():
+@gitlab_api.route('/repositories/<repo_id>/scan', methods=['POST'])
+async def trigger_repository_scan():
+    """Trigger a security scan for a specific repository"""
     try:
-        request_data = request.get_json()
-        if not request_data or 'project_id' not in request_data or 'access_token' not in request_data or 'user_id' not in request_data:
+        # Get data from request body
+        data = request.get_json()
+        if not data:
             return jsonify({
                 'success': False,
-                'error': {'message': 'Missing required parameters'}
+                'error': {'message': 'Request body is required'}
             }), 400
 
-        project_id = request_data['project_id']
-        access_token = request_data['access_token']
-        user_id = request_data['user_id']
+        required_fields = ['access_token', 'user_id']
+        missing_fields = [field for field in required_fields if field not in data]
+        if missing_fields:
+            return jsonify({
+                'success': False,
+                'error': {'message': f'Missing required fields: {", ".join(missing_fields)}'}
+            }), 400
 
-        # Create initial analysis record
-        analysis = GitLabAnalysisResult(
-            project_id=project_id,
-            user_id=user_id,
-            status='in_progress'
+        repo_id = request.view_args['repo_id']
+        access_token = data['access_token']
+        user_id = data['user_id']
+
+        # Get repository details
+        headers = {'Authorization': f"Bearer {access_token}"}
+        repo_response = requests.get(
+            f'https://gitlab.com/api/v4/projects/{repo_id}',
+            headers=headers
         )
-        db_session.add(analysis)
-        db_session.commit()
-        logger.info(f"Created analysis record with ID: {analysis.id}")
 
-        scan_config = GitLabScanConfig()
-        async with GitLabSecurityScanner(
-            config=scan_config,
-            db_session=db_session,
-            analysis_id=analysis.id
-        ) as scanner:
-            scan_result = await scanner.scan_repository(
-                project_url=f"https://gitlab.com/{project_id}",
+        if repo_response.status_code != 200:
+            return jsonify({
+                'success': False,
+                'error': {'message': 'Repository not found or inaccessible'}
+            }), 404
+
+        repo_data = repo_response.json()
+        project_url = repo_data['web_url']
+
+        # Create database session
+        engine = db.get_engine(current_app, bind='gitlab')
+        Session = sessionmaker(bind=engine)
+        db_session = Session()
+
+        try:
+            # Create initial analysis record
+            analysis = GitLabAnalysisResult(
+                project_id=str(repo_id),
+                project_url=project_url,
+                user_id=user_id,
+                status='in_progress',
+                timestamp=datetime.utcnow()
+            )
+            db_session.add(analysis)
+            db_session.commit()
+            logger.info(f"Created analysis record with ID: {analysis.id}")
+
+            # Trigger the scan
+            scan_result = await scan_gitlab_repository_handler(
+                project_url=project_url,
                 access_token=access_token,
-                user_id=user_id
+                user_id=user_id,
+                db_session=db_session
             )
 
-        if scan_result['success']:
-            # Update the analysis record with results
-            analysis.results = scan_result['data']
-            analysis.status = 'completed'
-        else:
-            analysis.status = 'failed'
-            analysis.error = scan_result.get('error', {}).get('message', 'Unknown error')
+            return jsonify({
+                'success': True,
+                'data': {
+                    'analysis_id': analysis.id,
+                    'repository': repo_data['path_with_namespace'],
+                    'scan_result': scan_result
+                }
+            })
 
-        db_session.commit()
-        logger.info(f"Updated analysis record {analysis.id} with scan results")
-
-        return jsonify({
-            'success': True,
-            'message': 'Scan initiated for selected repository',
-            'scan_result': scan_result
-        })
+        finally:
+            db_session.close()
 
     except Exception as e:
-        logger.error(f"Error in select_repository_for_scan: {str(e)}")
+        logger.error(f"Error triggering scan: {str(e)}")
         return jsonify({
             'success': False,
             'error': {'message': str(e)}
         }), 500
+
     
+
 
 @gitlab_api.route('/repositories', methods=['GET'])
 def list_repositories():
