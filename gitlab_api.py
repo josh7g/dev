@@ -15,6 +15,7 @@ from typing import Dict, Any, List
 from datetime import datetime
 import json
 import requests
+from flask import current_app
 
 logging.basicConfig(
     level=logging.INFO,
@@ -87,16 +88,27 @@ async def gitlab_oauth_callback():
             # Just scan the first repository for now
             if repositories:
                 repo = repositories[0]
-                await scan_gitlab_repository_handler(
-                    project_url=repo['web_url'],
-                    access_token=access_token,
-                    user_id=user_id,
-                    project_id=str(repo['id'])
-                )
-                return jsonify({
-                    'message': 'Authorization successful and scan initiated',
-                    'repository': repo['path_with_namespace']
-                })
+                
+                # Create database session
+                engine = db.get_engine(current_app, bind='gitlab')
+                Session = sessionmaker(bind=engine)
+                db_session = Session()
+                
+                try:
+                    scan_result = await scan_gitlab_repository_handler(
+                        project_url=repo['web_url'],
+                        access_token=access_token,
+                        user_id=user_id,
+                        db_session=db_session
+                    )
+                    
+                    return jsonify({
+                        'message': 'Authorization successful and scan initiated',
+                        'repository': repo['path_with_namespace'],
+                        'scan_result': scan_result
+                    })
+                finally:
+                    db_session.close()
             else:
                 return jsonify({'message': 'Authorization successful but no repositories found'})
                 
