@@ -367,14 +367,23 @@ class GitLabSecurityScanner:
             else:
                 path = project_url.lstrip('/')
             
-            # Make API call to get project ID
+            # Make API call to get project ID using OAuth token
             url = f"https://gitlab.com/api/v4/projects/{path.replace('/', '%2F')}"
-            headers = {'PRIVATE-TOKEN': access_token}
+            headers = {'Authorization': f'Bearer {access_token}'}
+            
+            logger.info(f"Fetching project ID for path: {path}")
             response = requests.get(url, headers=headers)
+            
             if response.status_code == 200:
-                return response.json()['id']
-            raise ValueError(f"Failed to get project ID for {path}")
+                project_data = response.json()
+                logger.info(f"Successfully got project ID: {project_data['id']}")
+                return project_data['id']
+                
+            logger.error(f"Failed to get project ID. Status: {response.status_code}, Response: {response.text}")
+            raise ValueError(f"Failed to get project ID for {path}. Status: {response.status_code}")
+            
         except Exception as e:
+            logger.error(f"Error extracting project ID: {str(e)}")
             raise ValueError(f"Invalid GitLab project URL or path: {str(e)}")
 
     async def scan_repository(self, project_url: str, access_token: str, user_id: str) -> Dict:
