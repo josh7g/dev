@@ -31,36 +31,39 @@ gitlab_api = Blueprint('gitlab_api', __name__, url_prefix='/api/v1/gitlab')
 
 @gitlab_api.route('/install', methods=['GET'])
 def install_app():
-    """Redirect to GitLab OAuth page with expanded scope for long-lived tokens"""
+    """Redirect to GitLab OAuth page with long-lived token configuration"""
     gitlab_auth_url = (
         f"https://gitlab.com/oauth/authorize?"
         f"client_id={os.getenv('GITLAB_APP_ID')}&"
         f"redirect_uri={os.getenv('GITLAB_CALLBACK_URL')}&"
         f"response_type=code&"
-        f"scope=api+read_repository+read_user&"
-        f"access_type=offline"  # Request offline access
+        f"scope=api+read_repository+read_user+read_api&"
+        f"access_type=offline&"
+        f"expires_in=31536000"  # Request 1-year token
     )
     return redirect(gitlab_auth_url)
 
 @gitlab_api.route('/oauth/callback')
 async def gitlab_oauth_callback():
-    """Handle GitLab OAuth callback with long-lived token support"""
+    """Handle GitLab OAuth callback with long-lived token handling"""
     try:
         code = request.args.get('code')
         if not code:
             return jsonify({'error': 'No code provided'}), 400
 
-        # Exchange code for access token with extended expiration
+        # Exchange code for long-lived access token
         data = {
             'client_id': os.getenv('GITLAB_APP_ID'),
             'client_secret': os.getenv('GITLAB_APP_SECRET'),
             'code': code,
             'grant_type': 'authorization_code',
             'redirect_uri': os.getenv('GITLAB_CALLBACK_URL'),
-            'access_type': 'offline',  # Request offline access token
+            'access_type': 'offline',
+            'expires_in': 31536000  # Request 1-year token
         }
 
         # Get access token
+        logger.info("Exchanging code for long-lived access token")
         response = requests.post('https://gitlab.com/oauth/token', data=data)
         if response.status_code != 200:
             logger.error(f"Failed to get access token: {response.text}")
@@ -68,9 +71,8 @@ async def gitlab_oauth_callback():
 
         token_data = response.json()
         access_token = token_data['access_token']
-        # Log token expiration if provided
-        if 'expires_in' in token_data:
-            logger.info(f"Token will expire in {token_data['expires_in']} seconds")
+        
+        logger.info(f"Token received with expiry: {token_data.get('expires_in')} seconds")
 
         # Get user information
         headers = {'Authorization': f"Bearer {access_token}"}
@@ -93,7 +95,6 @@ async def gitlab_oauth_callback():
         if repos_response.status_code == 200:
             repositories = repos_response.json()
             
-            # Format repository data
             formatted_repos = [{
                 'id': repo['id'],
                 'name': repo['name'],
@@ -116,9 +117,13 @@ async def gitlab_oauth_callback():
                     },
                     'access_token': access_token,
                     'token_info': {
-                        'expires_in': token_data.get('expires_in', 'unknown'),
+                        'expires_in': token_data.get('expires_in'),
+                        'scope': token_data.get('scope'),
                         'created_at': datetime.utcnow().isoformat(),
-                        'scope': token_data.get('scope', '')
+                        'expiration_date': (
+                            datetime.utcnow() + 
+                            timedelta(seconds=token_data.get('expires_in', 7200))
+                        ).isoformat()
                     },
                     'repositories': formatted_repos
                 }
