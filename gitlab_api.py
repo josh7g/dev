@@ -390,8 +390,9 @@ def get_vulnerable_file():
         }), 400
 
     try:
+        # Correct header format for GitLab API
         headers = {
-            'PRIVATE-TOKEN': access_token,
+            'Authorization': f'Bearer {access_token}',
             'Accept': 'application/json'
         }
         
@@ -406,8 +407,11 @@ def get_vulnerable_file():
             
         default_branch = project_response.json().get('default_branch', 'main')
         
+        # URL encode the file path for GitLab API
+        encoded_file_path = requests.utils.quote(file_path, safe='')
+        
         # Get file content
-        file_url = f"https://gitlab.com/api/v4/projects/{project_id}/repository/files/{file_path}/raw"
+        file_url = f"https://gitlab.com/api/v4/projects/{project_id}/repository/files/{encoded_file_path}/raw"
         params = {'ref': default_branch}
         
         file_response = requests.get(file_url, headers=headers, params=params)
