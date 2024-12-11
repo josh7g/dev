@@ -39,7 +39,7 @@ def install_app():
         f"response_type=code&"
         f"scope=api+read_repository+read_user+read_api&"
         f"access_type=offline&"
-        f"expires_in=31536000"  # Request 1-year token
+        
     )
     return redirect(gitlab_auth_url)
 
