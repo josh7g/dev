@@ -31,31 +31,33 @@ gitlab_api = Blueprint('gitlab_api', __name__, url_prefix='/api/v1/gitlab')
 
 @gitlab_api.route('/install', methods=['GET'])
 def install_app():
-    """Redirect to GitLab OAuth page"""
+    """Redirect to GitLab OAuth page with expanded scope for long-lived tokens"""
     gitlab_auth_url = (
         f"https://gitlab.com/oauth/authorize?"
         f"client_id={os.getenv('GITLAB_APP_ID')}&"
         f"redirect_uri={os.getenv('GITLAB_CALLBACK_URL')}&"
         f"response_type=code&"
-        f"scope=api+read_repository"
+        f"scope=api+read_repository+read_user&"
+        f"access_type=offline"  # Request offline access
     )
     return redirect(gitlab_auth_url)
 
 @gitlab_api.route('/oauth/callback')
 async def gitlab_oauth_callback():
-    """Handle GitLab OAuth callback and return repositories list"""
+    """Handle GitLab OAuth callback with long-lived token support"""
     try:
         code = request.args.get('code')
         if not code:
             return jsonify({'error': 'No code provided'}), 400
 
-        # Exchange code for access token
+        # Exchange code for access token with extended expiration
         data = {
             'client_id': os.getenv('GITLAB_APP_ID'),
             'client_secret': os.getenv('GITLAB_APP_SECRET'),
             'code': code,
             'grant_type': 'authorization_code',
-            'redirect_uri': os.getenv('GITLAB_CALLBACK_URL')
+            'redirect_uri': os.getenv('GITLAB_CALLBACK_URL'),
+            'access_type': 'offline',  # Request offline access token
         }
 
         # Get access token
@@ -66,6 +68,9 @@ async def gitlab_oauth_callback():
 
         token_data = response.json()
         access_token = token_data['access_token']
+        # Log token expiration if provided
+        if 'expires_in' in token_data:
+            logger.info(f"Token will expire in {token_data['expires_in']} seconds")
 
         # Get user information
         headers = {'Authorization': f"Bearer {access_token}"}
@@ -82,7 +87,7 @@ async def gitlab_oauth_callback():
         repos_response = requests.get(
             'https://gitlab.com/api/v4/projects',
             headers=headers,
-            params={'membership': True, 'min_access_level': 30}  # 30 = Developer access
+            params={'membership': True, 'min_access_level': 30}
         )
 
         if repos_response.status_code == 200:
@@ -110,6 +115,11 @@ async def gitlab_oauth_callback():
                         'username': user_data['username']
                     },
                     'access_token': access_token,
+                    'token_info': {
+                        'expires_in': token_data.get('expires_in', 'unknown'),
+                        'created_at': datetime.utcnow().isoformat(),
+                        'scope': token_data.get('scope', '')
+                    },
                     'repositories': formatted_repos
                 }
             })
@@ -119,6 +129,38 @@ async def gitlab_oauth_callback():
     except Exception as e:
         logger.error(f"GitLab OAuth error: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
+# Add a token validation endpoint
+@gitlab_api.route('/validate-token', methods=['POST'])
+def validate_token():
+    """Validate the current access token"""
+    try:
+        data = request.get_json()
+        access_token = data.get('access_token')
+        
+        if not access_token:
+            return jsonify({
+                'success': False,
+                'error': {'message': 'No token provided'}
+            }), 400
+
+        headers = {'Authorization': f"Bearer {access_token}"}
+        response = requests.get('https://gitlab.com/api/v4/user', headers=headers)
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'valid': response.status_code == 200,
+                'status': response.status_code,
+                'user_info': response.json() if response.status_code == 200 else None
+            }
+        })
+
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': {'message': str(e)}
+        }), 500
 
 @gitlab_api.route('/repositories/<repo_id>/scan', methods=['POST'])
 async def trigger_specific_repository_scan(repo_id):
