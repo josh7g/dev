@@ -127,6 +127,54 @@ async def gitlab_oauth_callback():
         logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
 
+@gitlab_api.route('/refresh-token', methods=['POST'])
+def refresh_access_token():
+    """Get new access token using refresh token"""
+    try:
+        data = request.get_json()
+        refresh_token = data.get('refresh_token')
+        
+        if not refresh_token:
+            return jsonify({
+                'success': False,
+                'error': {'message': 'Refresh token is required'}
+            }), 400
+
+        # Exchange refresh token for new access token
+        token_data = {
+            'client_id': os.getenv('GITLAB_APP_ID'),
+            'client_secret': os.getenv('GITLAB_APP_SECRET'),
+            'refresh_token': refresh_token,
+            'grant_type': 'refresh_token'
+        }
+
+        response = requests.post('https://gitlab.com/oauth/token', data=token_data)
+        
+        if response.status_code != 200:
+            return jsonify({
+                'success': False,
+                'error': {'message': 'Failed to refresh token'}
+            }), 400
+
+        new_token_data = response.json()
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'access_token': new_token_data['access_token'],
+                'refresh_token': new_token_data.get('refresh_token'),  # GitLab might provide new refresh token
+                'expires_in': new_token_data.get('expires_in', 7200),
+                'created_at': datetime.utcnow().isoformat()
+            }
+        })
+
+    except Exception as e:
+        logger.error(f"Token refresh error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': {'message': str(e)}
+        }), 500
+
 # Add a token validation endpoint
 @gitlab_api.route('/validate-token', methods=['POST'])
 def validate_token():
