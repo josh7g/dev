@@ -31,39 +31,35 @@ gitlab_api = Blueprint('gitlab_api', __name__, url_prefix='/api/v1/gitlab')
 
 @gitlab_api.route('/install', methods=['GET'])
 def install_app():
-    """Redirect to GitLab OAuth page with long-lived token configuration"""
+    """Redirect to GitLab OAuth page"""
     gitlab_auth_url = (
         f"https://gitlab.com/oauth/authorize?"
         f"client_id={os.getenv('GITLAB_APP_ID')}&"
         f"redirect_uri={os.getenv('GITLAB_CALLBACK_URL')}&"
         f"response_type=code&"
-        f"scope=api+read_repository+read_user+read_api&"
-        f"access_type=offline&"
-        
+        f"scope=api+read_user"
     )
     return redirect(gitlab_auth_url)
 
 @gitlab_api.route('/oauth/callback')
 async def gitlab_oauth_callback():
-    """Handle GitLab OAuth callback with long-lived token handling"""
+    """Handle GitLab OAuth callback and create PAT for long-term access"""
     try:
         code = request.args.get('code')
         if not code:
             return jsonify({'error': 'No code provided'}), 400
 
-        # Exchange code for long-lived access token
+        # First get OAuth token
         data = {
             'client_id': os.getenv('GITLAB_APP_ID'),
             'client_secret': os.getenv('GITLAB_APP_SECRET'),
             'code': code,
             'grant_type': 'authorization_code',
-            'redirect_uri': os.getenv('GITLAB_CALLBACK_URL'),
-            'access_type': 'offline',
-            'expires_in': 31536000  # Request 1-year token
+            'redirect_uri': os.getenv('GITLAB_CALLBACK_URL')
         }
 
-        # Get access token
-        logger.info("Exchanging code for long-lived access token")
+        # Get initial access token
+        logger.info("Exchanging code for access token")
         response = requests.post('https://gitlab.com/oauth/token', data=data)
         if response.status_code != 200:
             logger.error(f"Failed to get access token: {response.text}")
@@ -71,11 +67,31 @@ async def gitlab_oauth_callback():
 
         token_data = response.json()
         access_token = token_data['access_token']
-        
-        logger.info(f"Token received with expiry: {token_data.get('expires_in')} seconds")
 
-        # Get user information
+        # Create Personal Access Token
         headers = {'Authorization': f"Bearer {access_token}"}
+        pat_data = {
+            'name': f'SecurityScanner_{datetime.utcnow().strftime("%Y%m%d_%H%M%S")}',
+            'expires_at': (datetime.utcnow() + timedelta(days=365)).strftime('%Y-%m-%d'),
+            'scopes': ['api', 'read_user']
+        }
+
+        logger.info("Creating Personal Access Token")
+        pat_response = requests.post(
+            'https://gitlab.com/api/v4/personal_access_tokens',
+            headers=headers,
+            json=pat_data
+        )
+
+        if pat_response.status_code != 201:
+            logger.error(f"Failed to create PAT: {pat_response.text}")
+            return jsonify({'error': 'Failed to create personal access token'}), 400
+
+        pat_info = pat_response.json()
+        long_lived_token = pat_info['token']
+        
+        # Get user information using PAT
+        headers = {'Authorization': f"Bearer {long_lived_token}"}
         user_response = requests.get('https://gitlab.com/api/v4/user', headers=headers)
         
         if user_response.status_code != 200:
@@ -85,7 +101,7 @@ async def gitlab_oauth_callback():
         user_data = user_response.json()
         user_id = str(user_data['id'])
 
-        # Get user's repositories
+        # Get user's repositories using PAT
         repos_response = requests.get(
             'https://gitlab.com/api/v4/projects',
             headers=headers,
@@ -115,25 +131,26 @@ async def gitlab_oauth_callback():
                         'name': user_data['name'],
                         'username': user_data['username']
                     },
-                    'access_token': access_token,
+                    'access_token': long_lived_token,
                     'token_info': {
-                        'expires_in': token_data.get('expires_in'),
-                        'scope': token_data.get('scope'),
+                        'type': 'personal_access_token',
                         'created_at': datetime.utcnow().isoformat(),
-                        'expiration_date': (
-                            datetime.utcnow() + 
-                            timedelta(seconds=token_data.get('expires_in', 7200))
-                        ).isoformat()
+                        'expires_at': pat_info['expires_at'],
+                        'scopes': pat_info['scopes'],
+                        'token_name': pat_info['name']
                     },
                     'repositories': formatted_repos
                 }
             })
 
+        logger.error("Failed to fetch repositories")
         return jsonify({'error': 'Failed to fetch repositories'}), 400
 
     except Exception as e:
         logger.error(f"GitLab OAuth error: {str(e)}")
+        logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
+    
 
 # Add a token validation endpoint
 @gitlab_api.route('/validate-token', methods=['POST'])
