@@ -37,19 +37,19 @@ def install_app():
         f"client_id={os.getenv('GITLAB_APP_ID')}&"
         f"redirect_uri={os.getenv('GITLAB_CALLBACK_URL')}&"
         f"response_type=code&"
-        f"scope=api+read_user+write_repository" 
+        f"scope=api+read_user+read_repository"
     )
     return redirect(gitlab_auth_url)
 
 @gitlab_api.route('/oauth/callback')
 async def gitlab_oauth_callback():
-    """Handle GitLab OAuth callback and create PAT for long-term access"""
+    """Handle GitLab OAuth callback"""
     try:
         code = request.args.get('code')
         if not code:
             return jsonify({'error': 'No code provided'}), 400
 
-        # First get OAuth token
+        # Exchange code for access token
         data = {
             'client_id': os.getenv('GITLAB_APP_ID'),
             'client_secret': os.getenv('GITLAB_APP_SECRET'),
@@ -58,7 +58,6 @@ async def gitlab_oauth_callback():
             'redirect_uri': os.getenv('GITLAB_CALLBACK_URL')
         }
 
-        # Get initial access token
         logger.info("Exchanging code for access token")
         response = requests.post('https://gitlab.com/oauth/token', data=data)
         if response.status_code != 200:
@@ -67,31 +66,10 @@ async def gitlab_oauth_callback():
 
         token_data = response.json()
         access_token = token_data['access_token']
+        refresh_token = token_data.get('refresh_token')
 
-        # Create Personal Access Token
+        # Get user information
         headers = {'Authorization': f"Bearer {access_token}"}
-        pat_data = {
-            'name': f'SecurityScanner_{datetime.utcnow().strftime("%Y%m%d_%H%M%S")}',
-            'expires_at': (datetime.utcnow() + timedelta(days=365)).strftime('%Y-%m-%d'),
-            'scopes': ['api', 'read_user', 'read_repository']
-        }
-
-        logger.info("Creating Personal Access Token")
-        pat_response = requests.post(
-            'https://gitlab.com/api/v4/users/current/personal_access_tokens', 
-            headers=headers,
-            json=pat_data
-        )
-
-        if pat_response.status_code != 201:
-            logger.error(f"Failed to create PAT: {pat_response.text}")
-            return jsonify({'error': 'Failed to create personal access token'}), 400
-
-        pat_info = pat_response.json()
-        long_lived_token = pat_info['token']
-        
-        # Get user information using PAT
-        headers = {'Authorization': f"Bearer {long_lived_token}"}
         user_response = requests.get('https://gitlab.com/api/v4/user', headers=headers)
         
         if user_response.status_code != 200:
@@ -101,7 +79,7 @@ async def gitlab_oauth_callback():
         user_data = user_response.json()
         user_id = str(user_data['id'])
 
-        # Get user's repositories using PAT
+        # Get user's repositories
         repos_response = requests.get(
             'https://gitlab.com/api/v4/projects',
             headers=headers,
@@ -131,26 +109,23 @@ async def gitlab_oauth_callback():
                         'name': user_data['name'],
                         'username': user_data['username']
                     },
-                    'access_token': long_lived_token,
+                    'access_token': access_token,
                     'token_info': {
-                        'type': 'personal_access_token',
+                        'expires_in': token_data.get('expires_in', 7200),
+                        'refresh_token': refresh_token,
                         'created_at': datetime.utcnow().isoformat(),
-                        'expires_at': pat_info['expires_at'],
-                        'scopes': pat_info['scopes'],
-                        'token_name': pat_info['name']
+                        'scope': token_data.get('scope')
                     },
                     'repositories': formatted_repos
                 }
             })
 
-        logger.error("Failed to fetch repositories")
         return jsonify({'error': 'Failed to fetch repositories'}), 400
 
     except Exception as e:
         logger.error(f"GitLab OAuth error: {str(e)}")
         logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
-    
 
 # Add a token validation endpoint
 @gitlab_api.route('/validate-token', methods=['POST'])
