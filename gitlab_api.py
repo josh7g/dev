@@ -37,7 +37,7 @@ def install_app():
         f"client_id={os.getenv('GITLAB_APP_ID')}&"
         f"redirect_uri={os.getenv('GITLAB_CALLBACK_URL')}&"
         f"response_type=code&"
-        f"scope=api+read_user"
+        f"scope=api+read_user+write_repository" 
     )
     return redirect(gitlab_auth_url)
 
@@ -73,12 +73,12 @@ async def gitlab_oauth_callback():
         pat_data = {
             'name': f'SecurityScanner_{datetime.utcnow().strftime("%Y%m%d_%H%M%S")}',
             'expires_at': (datetime.utcnow() + timedelta(days=365)).strftime('%Y-%m-%d'),
-            'scopes': ['api', 'read_user']
+            'scopes': ['api', 'read_user', 'read_repository']
         }
 
         logger.info("Creating Personal Access Token")
         pat_response = requests.post(
-            'https://gitlab.com/api/v4/personal_access_tokens',
+            'https://gitlab.com/api/v4/users/current/personal_access_tokens', 
             headers=headers,
             json=pat_data
         )
